@@ -31,6 +31,8 @@ ACTIVITY_LOG_FILE = "activity.log"
 OLD_ACTIVITY_LOG_FILE = "old_activity.log"
 MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
 
+MAX_PIXELS = 1240000  # 1.24MP
+
 def get_imgbb_api_key():
     key = os.environ.get("IMGBB_API_KEY")
     if not key:
@@ -88,14 +90,14 @@ def list_active_jobs():
     with open(ACTIVE_JOBS_FILE, "r") as f:
         return [line.strip().split(",", 3) for line in f if line.strip()]
 
-def log_activity(prompt, input_url, output_url):
+def log_activity(prompt, output_url, nsfw_flagged):
     # Roll log if needed
     if os.path.exists(ACTIVITY_LOG_FILE) and os.path.getsize(ACTIVITY_LOG_FILE) > MAX_LOG_SIZE:
         shutil.move(ACTIVITY_LOG_FILE, OLD_ACTIVITY_LOG_FILE)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(ACTIVITY_LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([now, prompt, input_url, output_url])
+        writer.writerow([now, prompt, output_url, nsfw_flagged])
 
 def process_active_jobs_on_startup():
     jobs = list_active_jobs()
@@ -116,7 +118,7 @@ def process_active_jobs_on_startup():
                             response = requests.get(output_url)
                             images_out.append(Image.open(io.BytesIO(response.content)))
                             urls_out.append(output_url)
-                            log_activity(prompt, input_url, output_url)
+                            log_activity(prompt, output_url, False)
                 # Save images to output dir
                 if images_out and urls_out:
                     outdir = os.path.join("output", datetime.now().strftime("%Y%m%d"))
@@ -125,7 +127,10 @@ def process_active_jobs_on_startup():
                         fal_hash = extract_fal_hash(out_url)
                         if fal_hash:
                             ext = os.path.splitext(out_url)[1]
-                            filename = os.path.join(outdir, f"{fal_hash}{ext}")
+                            if fal_hash.endswith(ext):
+                                filename = os.path.join(outdir, fal_hash)
+                            else:
+                                filename = os.path.join(outdir, f"{fal_hash}{ext}")
                             img.save(filename)
                             debug(f"Saved output image: {filename}")
                 remove_active_job(request_id)
@@ -146,6 +151,7 @@ def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, ou
         "num_inference_steps": int(num_inference_steps)
     }
     job_id_holder = {}
+    api_result_holder = {}
     def on_enqueue(request_id):
         debug(f"Request enqueued with ID: {request_id}")
         append_active_job(request_id, prompt, image_url)
@@ -160,6 +166,7 @@ def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, ou
         on_queue_update=on_queue_update if VERBOSE else None,
     )
     debug(f"API response: {result}")
+    api_result_holder['result'] = result
     images_out = []
     urls_out = []
     if isinstance(result, dict):
@@ -172,14 +179,25 @@ def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, ou
                     response = requests.get(output_url)
                     images_out.append(Image.open(io.BytesIO(response.content)))
                     urls_out.append(output_url)
-                    # Log activity
-                    log_activity(prompt, image_url, output_url)
     # Remove from .active if job_id is known
     if 'id' in job_id_holder:
         remove_active_job(job_id_holder['id'])
+    # Store the last API result for NSFW checking
+    call_kontext.last_api_result = api_result_holder['result']
     return images_out, urls_out
 
+def resize_to_max_pixels(img: Image.Image, max_pixels=MAX_PIXELS) -> Image.Image:
+    w, h = img.size
+    if w * h <= max_pixels:
+        return img
+    aspect = w / h
+    new_h = int((max_pixels / aspect) ** 0.5)
+    new_w = int(new_h * aspect)
+    debug(f"Resizing image from {w}x{h} to {new_w}x{new_h} to fit under {max_pixels} pixels.")
+    return img.resize((new_w, new_h), Image.LANCZOS)
+
 def image_to_data_uri(img: Image.Image, format: str = "PNG") -> str:
+    img = resize_to_max_pixels(img)
     buffered = io.BytesIO()
     img.save(buffered, format=format)
     img_bytes = buffered.getvalue()
@@ -188,14 +206,32 @@ def image_to_data_uri(img: Image.Image, format: str = "PNG") -> str:
 
 def process(prompt, raw, image, safety, seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output):
     if isinstance(image, Image.Image):
-        # Encode image as base64 Data URI
+        # Resize before encoding
+        image = resize_to_max_pixels(image)
         data_uri = image_to_data_uri(image, format='PNG')
         url = data_uri
     elif isinstance(image, str) and image.startswith("http"):
         url = image
     else:
         return None, ""
-    out_imgs, out_urls = call_kontext(prompt, url, safety, seed, guidance_scale, num_images, output_format, raw, image_prompt_strength, num_inference_steps)
+    result = call_kontext(prompt, url, safety, seed, guidance_scale, num_images, output_format, raw, image_prompt_strength, num_inference_steps)
+    out_imgs, out_urls = result
+    nsfw_blocked = False
+    nsfw_flags = []
+    if hasattr(call_kontext, 'last_api_result'):
+        api_result = call_kontext.last_api_result
+        has_nsfw = api_result.get('has_nsfw_concepts') if isinstance(api_result, dict) else None
+        if has_nsfw:
+            nsfw_flags = list(has_nsfw)
+            if any(has_nsfw):
+                nsfw_blocked = True
+    # Log all outputs, even if NSFW
+    for i, out_url in enumerate(out_urls):
+        nsfw_flagged = nsfw_flags[i] if i < len(nsfw_flags) else False
+        log_activity(prompt, out_url, nsfw_flagged)
+    if nsfw_blocked:
+        info_md = f"**Prompt:** {prompt}\n\n**Seed:** {seed}\n\n**Blocked for NSFW, image not saved.**"
+        return None, info_md
     # Always save images if requested, regardless of how they were produced
     if save_output and out_imgs and out_urls:
         outdir = os.path.join("output", datetime.now().strftime("%Y%m%d"))
@@ -204,11 +240,17 @@ def process(prompt, raw, image, safety, seed, guidance_scale, num_images, output
             fal_hash = extract_fal_hash(out_url)
             if fal_hash:
                 ext = os.path.splitext(out_url)[1]
-                filename = os.path.join(outdir, f"{fal_hash}{ext}")
-                debug(f"Saving output image to: {filename}")
-                img.save(filename)
-                debug(f"Saved output image: {filename}")
-                print(f"Saved output image: {filename}")
+                if fal_hash.endswith(ext):
+                    filename = os.path.join(outdir, fal_hash)
+                else:
+                    filename = os.path.join(outdir, f"{fal_hash}{ext}")
+                try:
+                    debug(f"Saving output image to: {filename}")
+                    img.save(filename)
+                    debug(f"Saved output image: {filename}")
+                    print(f"Saved output image: {filename}")
+                except Exception as e:
+                    debug(f"Failed to save output image to {filename}: {e}")
     # Print URLs to CLI
     for out_url in out_urls:
         print(f"Output URL: {out_url}")
@@ -263,9 +305,9 @@ def extract_first_frame_from_video(video_path):
     cap.release()
     if not success:
         raise ValueError("Could not read first frame from video.")
-    # Convert BGR (OpenCV) to RGB (Pillow)
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     img = Image.fromarray(frame_rgb)
+    img = resize_to_max_pixels(img)
     return img
 
 def main():
