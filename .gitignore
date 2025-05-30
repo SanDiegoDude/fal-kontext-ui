@@ -27,3 +27,6 @@ output/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Fal_key
+.fal_key

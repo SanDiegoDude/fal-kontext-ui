@@ -158,6 +158,12 @@ def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, ou
         payload["image_size"] = image_size
     elif aspect_ratio:
         payload["aspect_ratio"] = aspect_ratio
+    # Verbose logging: print payload with base64 image replaced
+    if VERBOSE:
+        payload_log = payload.copy()
+        if isinstance(payload_log.get("image_url"), str) and payload_log["image_url"].startswith("data:image/"):
+            payload_log["image_url"] = "(base64 image)"
+        print(f"[VERBOSE] Upload payload: {payload_log}")
     # Note: The API currently only supports one input image (image_url). Multi-image input is not supported as of now.
     job_id_holder = {}
     api_result_holder = {}
@@ -308,37 +314,26 @@ def ensure_env_var(var_name, prompt_text):
     value = os.environ.get(var_name)
     if value:
         return value
+    key_file = ".fal_key"
+    if os.path.exists(key_file):
+        with open(key_file, "r") as f:
+            value = f.read().strip()
+            if value:
+                os.environ[var_name] = value
+                return value
     # Prompt user for the value
-    print(f"[Kontext UI] {var_name} not found in environment.")
+    print(f"[Kontext UI] {var_name} not found in environment or .fal_key file.")
     value = input(f"Please enter your {prompt_text}: ").strip()
     os.environ[var_name] = value
-    # Try to persist to shell profile
-    home = os.path.expanduser("~")
-    if sys.platform.startswith("win"):
-        try:
-            import subprocess
-            subprocess.run(["setx", var_name, value], check=True)
-            print(f"[Kontext UI] {var_name} saved to your user environment variables.")
-        except Exception as e:
-            print(f"[Kontext UI] Could not persist {var_name} to user environment: {e}")
-    else:
-        profile_files = [os.path.join(home, f) for f in [".zshrc", ".bashrc", ".profile"]]
-        for pf in profile_files:
-            try:
-                with open(pf, "a") as f:
-                    f.write(f"\nexport {var_name}='{value}'\n")
-                print(f"[Kontext UI] {var_name} saved to {pf}.")
-                break
-            except Exception as e:
-                continue
-        else:
-            print(f"[Kontext UI] Could not persist {var_name} to shell profile. Please set it manually next time.")
+    with open(key_file, "w") as f:
+        f.write(value)
+    print(f"[Kontext UI] {var_name} saved to {key_file} for future runs.")
     return value
 
 # Only check for FAL_KEY now
 FAL_KEY = ensure_env_var("FAL_KEY", "Fal API key")
 
-def extract_first_frame_from_video(video_path):
+def extract_first_frame_from_video(video_path, rotate_degrees=0):
     cap = cv2.VideoCapture(video_path)
     success, frame = cap.read()
     cap.release()
@@ -346,6 +341,8 @@ def extract_first_frame_from_video(video_path):
         raise ValueError("Could not read first frame from video.")
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     img = Image.fromarray(frame_rgb)
+    if rotate_degrees in [90, 180, 270]:
+        img = img.rotate(-rotate_degrees, expand=True)  # PIL rotates counterclockwise, so negative for clockwise
     img = resize_to_max_pixels(img)
     return img
 
@@ -446,6 +443,8 @@ def main():
                     safety = gr.Slider(label="Safety Tolerance (1=Strict, 6=Permissive)", minimum=1, maximum=6, step=1, value=5)
                     save_input = gr.Checkbox(label="Save Input Image with output", value=False)
                 video_upload = gr.File(label="Upload Video (extract first frame)", file_types=[".mp4", ".mov", ".avi", ".webm"], type="filepath")
+                rotate_choices = [0, 90, 180, 270]
+                rotate_dropdown = gr.Dropdown(label="Rotate Frame Degrees", choices=rotate_choices, value=0)
                 extract_btn = gr.Button("Extract First Frame from Video")
             with gr.Column():
                 image = gr.Image(label="Input Image", type="pil", height=512, show_label=True, elem_id="input-image")
@@ -478,16 +477,16 @@ def main():
         # Prompt box: run on Ctrl+Enter
         prompt.submit(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, output_aspect, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box, seed], queue=True, preprocess=True)
         # Video upload: extract first frame and set as image input
-        def handle_video_extract(video_path):
+        def handle_video_extract(video_path, rotate_degrees):
             if not video_path:
                 return gr.update()
             try:
-                img = extract_first_frame_from_video(video_path)
+                img = extract_first_frame_from_video(video_path, rotate_degrees)
                 return img
             except Exception as e:
                 print(f"[ERROR] Could not extract frame: {e}")
                 return gr.update()
-        extract_btn.click(handle_video_extract, inputs=[video_upload], outputs=[image])
+        extract_btn.click(handle_video_extract, inputs=[video_upload, rotate_dropdown], outputs=[image])
     # Ensure .gitignore is updated and process active jobs on startup
     ensure_gitignore()
     process_active_jobs_on_startup()

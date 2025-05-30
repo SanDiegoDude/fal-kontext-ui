@@ -60,6 +60,16 @@ Example (Windows, PowerShell):
 $env:FAL_KEY="your_fal_api_key"
 ```
 
+## API Key Setup
+
+On first run, the app will prompt you for your Fal API key and store it in a local hidden file called `.fal_key` in the project root. This file is used for all future runs and is ignored by git (not committed to version control).
+
+- If you want to change the key, simply delete the `.fal_key` file and restart the app.
+- If you set the `FAL_KEY` environment variable, it will override the value in `.fal_key`.
+- **Do not share your `.fal_key` file.**
+
+You do not need to manually set environment variables unless you want to override the key for a specific session.
+
 ## Usage
 
 Run the app with:
