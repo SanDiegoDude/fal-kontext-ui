@@ -446,14 +446,16 @@ def main():
         def run_all(prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input):
             if lock_seed:
                 use_seed = int(seed)
+                new_seed = use_seed
             else:
                 use_seed = random.randint(0, 2**32 - 1)
-                last_seed["value"] = use_seed
-            return process(prompt, raw, image, int(safety), use_seed, float(guidance_scale), int(num_images), output_format, float(image_prompt_strength), int(num_inference_steps), save_output, save_input)
+                new_seed = use_seed
+            out_img, info_md = process(prompt, raw, image, int(safety), use_seed, float(guidance_scale), int(num_images), output_format, float(image_prompt_strength), int(num_inference_steps), save_output, save_input)
+            return out_img, info_md, gr.update(value=new_seed)
         # Run button click
-        run_btn.click(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box])
+        run_btn.click(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box, seed])
         # Prompt box: run on Ctrl+Enter
-        prompt.submit(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box], queue=True, preprocess=True)
+        prompt.submit(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box, seed], queue=True, preprocess=True)
         # Video upload: extract first frame and set as image input
         def handle_video_extract(video_path):
             if not video_path:
