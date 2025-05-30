@@ -1,5 +1,28 @@
-output/
-venv/ activity.log
-old_activity.log
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+
+# Kontext UI job/activity logs
 .active
 activity.log
+old_activity.log
+
+# OS files
+.DS_Store
+Thumbs.db
