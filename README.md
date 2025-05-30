@@ -4,7 +4,8 @@
 
 Kontext UI is an open source interface for the [Fal Kontext API](https://fal.ai/models/fal-ai/flux-pro/kontext/api?platform=python), allowing you to edit images using natural language prompts. The system supports robust job tracking, logging, and automatic resumption of incomplete jobs.
 
-![image](https://github.com/user-attachments/assets/5751424a-9202-4bf2-80a8-7b3f5eecbffa)
+![image](https://github.com/user-attachments/assets/4431f697-9563-488a-935d-9329043c3df0)
+
 
 
 ## Features
