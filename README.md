@@ -17,6 +17,10 @@ Kontext UI is an open source interface for the [Fal Kontext API](https://fal.ai/
 - Ensures all output images are saved locally if the 'Save output image' box is checked
 - Save output images to the `output/YYYYMMDD/` directory, with filenames based on the image hash from the API response.
 - Optionally, save the input image alongside the output image by enabling the 'Save Input Image with output' setting. The input image will be saved in the same directory, with `_input` appended to the filename, and will be converted to match the output filetype (e.g., JPEG or PNG).
+- Choose the output aspect ratio with a dropdown (default: Match input image, or select from preset ratios like 16:9, 4:3, etc.)
+- Output images are displayed in a grid (gallery) when generating multiple images (batch size > 1)
+- The seed input updates to the actual seed used after each run, unless 'Lock Seed' is checked (in which case it stays fixed)
+- Video-to-image extraction (extract first frame) is available in the left column for easy access
 
 ## Installation
 
@@ -75,11 +79,10 @@ python kontext-ui.py --host 0.0.0.0 --port 7500
 - All activity is logged to `activity.log` (rolls over to `old_activity.log` at 10MB)
 - Output images are saved to the `output/YYYYMMDD/` directory if 'Save output image' is checked
 - **To use the video-to-image feature:** Upload a video file, click "Extract First Frame from Video", and the first frame will be set as the input image for editing
+- **Output Aspect Ratio:** Use the dropdown in Additional Settings to match the input image's aspect ratio or select a preset (e.g., 16:9, 4:3, 1:1, etc.).
+- **Batch Output:** When generating multiple images, all outputs are shown in a grid below the input image.
+- **Seed Handling:** The seed input will update to the actual seed used after each run, unless 'Lock Seed' is checked.
+- **Video-to-Image:** Upload a video and extract the first frame from the left column, then use it as your input image.
 
 ## Notes
-- `.active`, `activity.log`, `old_activity.log`, and `output/` are automatically added to `.gitignore`
-- If the app is restarted, any jobs in progress will be resumed and their results saved
-- If you encounter issues with image saving or job tracking, check the debug output (run with `--verbose`)
-
-## License
-MIT
+- `.active`, `activity.log`, `

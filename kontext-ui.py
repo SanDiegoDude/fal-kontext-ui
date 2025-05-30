@@ -141,7 +141,7 @@ def process_active_jobs_on_startup():
         except Exception as e:
             debug(f"Error resuming job {request_id}: {e}")
 
-def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, output_format, raw, image_prompt_strength, num_inference_steps):
+def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, output_format, raw, output_aspect, image_size, aspect_ratio, image_prompt_strength, num_inference_steps):
     payload = {
         "prompt": prompt,
         "image_url": image_url,
@@ -154,6 +154,11 @@ def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, ou
         "image_prompt_strength": float(image_prompt_strength),
         "num_inference_steps": int(num_inference_steps)
     }
+    if image_size:
+        payload["image_size"] = image_size
+    elif aspect_ratio:
+        payload["aspect_ratio"] = aspect_ratio
+    # Note: The API currently only supports one input image (image_url). Multi-image input is not supported as of now.
     job_id_holder = {}
     api_result_holder = {}
     def on_enqueue(request_id):
@@ -212,7 +217,7 @@ def image_to_data_uri(img: Image.Image, format: str = "PNG") -> str:
     base64_str = base64.b64encode(img_bytes).decode("utf-8")
     return f"data:image/{format.lower()};base64,{base64_str}"
 
-def process(prompt, raw, image, safety, seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input):
+def process(prompt, raw, image, safety, seed, guidance_scale, num_images, output_format, output_aspect, image_size, aspect_ratio, image_prompt_strength, num_inference_steps, save_output, save_input):
     if isinstance(image, Image.Image):
         # Resize before encoding
         image = resize_to_max_pixels(image)
@@ -221,8 +226,8 @@ def process(prompt, raw, image, safety, seed, guidance_scale, num_images, output
     elif isinstance(image, str) and image.startswith("http"):
         url = image
     else:
-        return None, ""
-    result = call_kontext(prompt, url, safety, seed, guidance_scale, num_images, output_format, raw, image_prompt_strength, num_inference_steps)
+        return [], ""
+    result = call_kontext(prompt, url, safety, seed, guidance_scale, num_images, output_format, raw, output_aspect, image_size, aspect_ratio, image_prompt_strength, num_inference_steps)
     out_imgs, out_urls = result
     nsfw_flags = []
     if hasattr(call_kontext, 'last_api_result'):
@@ -288,9 +293,9 @@ def process(prompt, raw, image, safety, seed, guidance_scale, num_images, output
     all_nsfw = all((nsfw_flags[i] if i < len(nsfw_flags) else False) for i in range(len(out_urls))) if out_urls else False
     if all_nsfw:
         info_md = f"**Prompt:** {prompt}\n\n**Seed:** {seed}\n\n**Blocked for NSFW, image not saved.**"
-        return None, info_md
+        return [], info_md
     info_md = f"**Prompt:** {prompt}\n\n**Seed:** {seed}\n\n**Output URL(s):**\n" + "\n".join(out_urls if out_urls else ['N/A'])
-    return (out_imgs[0] if out_imgs else None), info_md
+    return out_imgs, info_md
 
 def extract_fal_hash(url):
     # Extract everything after /files/<any-animal>/ in the URL
@@ -433,29 +438,45 @@ def main():
                     num_inference_steps = gr.Slider(label="Steps", minimum=10, maximum=100, step=1, value=28)
                     guidance_scale = gr.Slider(label="CFG (Guidance Scale)", minimum=1.0, maximum=10.0, step=0.1, value=3.5)
                     output_format = gr.Dropdown(label="Output Format", choices=["jpeg", "png"], value="jpeg")
+                    aspect_ratio_choices = [
+                        "Match input image",
+                        "21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "9:21"
+                    ]
+                    output_aspect = gr.Dropdown(label="Output Aspect Ratio", choices=aspect_ratio_choices, value="Match input image")
                     safety = gr.Slider(label="Safety Tolerance (1=Strict, 6=Permissive)", minimum=1, maximum=6, step=1, value=5)
                     save_input = gr.Checkbox(label="Save Input Image with output", value=False)
                 video_upload = gr.File(label="Upload Video (extract first frame)", file_types=[".mp4", ".mov", ".avi", ".webm"], type="filepath")
                 extract_btn = gr.Button("Extract First Frame from Video")
             with gr.Column():
                 image = gr.Image(label="Input Image", type="pil", height=512, show_label=True, elem_id="input-image")
-                after = gr.Image(label="Output Image", show_label=True, height=512, elem_id="output-image")
+                after = gr.Gallery(label="Output Images", show_label=True, height=512, elem_id="output-image", columns=[2])
                 save_output = gr.Checkbox(label="Save output image", value=True)
                 info_box = gr.Markdown("", elem_id="output-info")
         last_seed = {"value": default_seed}
-        def run_all(prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input):
+        def run_all(prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, output_aspect, image_prompt_strength, num_inference_steps, save_output, save_input):
             if lock_seed:
                 use_seed = int(seed)
                 new_seed = use_seed
             else:
                 use_seed = random.randint(0, 2**32 - 1)
                 new_seed = use_seed
-            out_img, info_md = process(prompt, raw, image, int(safety), use_seed, float(guidance_scale), int(num_images), output_format, float(image_prompt_strength), int(num_inference_steps), save_output, save_input)
-            return out_img, info_md, gr.update(value=new_seed)
+            # Determine image_size or aspect_ratio for API
+            image_size = None
+            aspect_ratio = None
+            resized_dims = None
+            if output_aspect == "Match input image" and isinstance(image, Image.Image):
+                # Use resized image dimensions, capped at 1.24MP
+                resized = resize_to_max_pixels(image)
+                resized_dims = resized.size
+                image_size = {"width": resized_dims[0], "height": resized_dims[1]}
+            elif output_aspect != "Match input image":
+                aspect_ratio = output_aspect
+            out_imgs, info_md = process(prompt, raw, image, int(safety), use_seed, float(guidance_scale), int(num_images), output_format, output_aspect, image_size, aspect_ratio, float(image_prompt_strength), int(num_inference_steps), save_output, save_input)
+            return out_imgs, info_md, gr.update(value=new_seed)
         # Run button click
-        run_btn.click(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box, seed])
+        run_btn.click(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, output_aspect, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box, seed])
         # Prompt box: run on Ctrl+Enter
-        prompt.submit(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box, seed], queue=True, preprocess=True)
+        prompt.submit(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, output_aspect, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box, seed], queue=True, preprocess=True)
         # Video upload: extract first frame and set as image input
         def handle_video_extract(video_path):
             if not video_path:
