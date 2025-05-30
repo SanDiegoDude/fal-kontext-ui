@@ -101,7 +101,11 @@ def log_activity(prompt, output_url, nsfw_flagged):
 
 def process_active_jobs_on_startup():
     jobs = list_active_jobs()
-    for request_id, ts, prompt, input_url in jobs:
+    for job in jobs:
+        if len(job) != 4:
+            debug(f"Skipping malformed .active line: {job}")
+            continue
+        request_id, ts, prompt, input_url = job
         debug(f"Resuming job {request_id} from .active...")
         try:
             status = fal_client.status("fal-ai/flux-pro/kontext", request_id, with_logs=False)
@@ -184,6 +188,10 @@ def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, ou
         remove_active_job(job_id_holder['id'])
     # Store the last API result for NSFW checking
     call_kontext.last_api_result = api_result_holder['result']
+    print(f"[DEBUG] out_imgs type: {type(images_out)}, length: {len(images_out) if hasattr(images_out, '__len__') else 'N/A'}")
+    print(f"[DEBUG] out_urls type: {type(urls_out)}, length: {len(urls_out) if hasattr(urls_out, '__len__') else 'N/A'}")
+    print(f"[DEBUG] out_imgs contents: {images_out}")
+    print(f"[DEBUG] out_urls contents: {urls_out}")
     return images_out, urls_out
 
 def resize_to_max_pixels(img: Image.Image, max_pixels=MAX_PIXELS) -> Image.Image:
@@ -204,7 +212,7 @@ def image_to_data_uri(img: Image.Image, format: str = "PNG") -> str:
     base64_str = base64.b64encode(img_bytes).decode("utf-8")
     return f"data:image/{format.lower()};base64,{base64_str}"
 
-def process(prompt, raw, image, safety, seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output):
+def process(prompt, raw, image, safety, seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input):
     if isinstance(image, Image.Image):
         # Resize before encoding
         image = resize_to_max_pixels(image)
@@ -216,51 +224,77 @@ def process(prompt, raw, image, safety, seed, guidance_scale, num_images, output
         return None, ""
     result = call_kontext(prompt, url, safety, seed, guidance_scale, num_images, output_format, raw, image_prompt_strength, num_inference_steps)
     out_imgs, out_urls = result
-    nsfw_blocked = False
     nsfw_flags = []
     if hasattr(call_kontext, 'last_api_result'):
         api_result = call_kontext.last_api_result
         has_nsfw = api_result.get('has_nsfw_concepts') if isinstance(api_result, dict) else None
         if has_nsfw:
             nsfw_flags = list(has_nsfw)
-            if any(has_nsfw):
-                nsfw_blocked = True
     # Log all outputs, even if NSFW
     for i, out_url in enumerate(out_urls):
         nsfw_flagged = nsfw_flags[i] if i < len(nsfw_flags) else False
         log_activity(prompt, out_url, nsfw_flagged)
-    if nsfw_blocked:
-        info_md = f"**Prompt:** {prompt}\n\n**Seed:** {seed}\n\n**Blocked for NSFW, image not saved.**"
-        return None, info_md
-    # Always save images if requested, regardless of how they were produced
+    # Save images if requested, skipping those flagged as NSFW
+    saved_any = False
     if save_output and out_imgs and out_urls:
         outdir = os.path.join("output", datetime.now().strftime("%Y%m%d"))
         os.makedirs(outdir, exist_ok=True)
-        for img, out_url in zip(out_imgs, out_urls):
+        for i, (img, out_url) in enumerate(zip(out_imgs, out_urls)):
+            nsfw_flagged = nsfw_flags[i] if i < len(nsfw_flags) else False
+            print(f"[DEBUG] About to extract fal_hash from out_url: {out_url}")
             fal_hash = extract_fal_hash(out_url)
+            print(f"[DEBUG] Result of extract_fal_hash: {fal_hash}")
             if fal_hash:
                 ext = os.path.splitext(out_url)[1]
-                if fal_hash.endswith(ext):
-                    filename = os.path.join(outdir, fal_hash)
-                else:
+                if not ext:
+                    ext = f'.{output_format}'
+                if not fal_hash.endswith(ext):
                     filename = os.path.join(outdir, f"{fal_hash}{ext}")
+                else:
+                    filename = os.path.join(outdir, fal_hash)
+                if nsfw_flagged:
+                    debug(f"Skipping save for {filename} due to NSFW block.")
+                    print(f"Image blocked for NSFW, not saved: {filename}")
+                    continue
                 try:
                     debug(f"Saving output image to: {filename}")
+                    print(f"[DEBUG] Attempting to save output image to: {filename}")
                     img.save(filename)
                     debug(f"Saved output image: {filename}")
-                    print(f"Saved output image: {filename}")
+                    print(f"[DEBUG] Saved output image: {filename}")
+                    saved_any = True
+                    # Save input image if requested
+                    if save_input:
+                        print(f"[DEBUG] save_input is True. image type: {type(image)}, value: {image}")
+                        if isinstance(image, Image.Image):
+                            input_filename = filename.replace(ext, f"_input{ext}")
+                            try:
+                                print(f"[DEBUG] Attempting to save input image to: {input_filename}")
+                                image.save(input_filename, format=output_format.upper())
+                                debug(f"Saved input image: {input_filename}")
+                                print(f"[DEBUG] Saved input image: {input_filename}")
+                            except Exception as e:
+                                debug(f"Failed to save input image to {input_filename}: {e}")
+                                print(f"[DEBUG] Failed to save input image to {input_filename}: {e}")
+                        else:
+                            print(f"[DEBUG] image is not a PIL.Image.Image, skipping input save.")
                 except Exception as e:
                     debug(f"Failed to save output image to {filename}: {e}")
+                    print(f"[DEBUG] Failed to save output image to {filename}: {e}")
     # Print URLs to CLI
     for out_url in out_urls:
         print(f"Output URL: {out_url}")
-    # Only show the first image in the UI, but info box lists all URLs
+    # Info box: if all images are NSFW, show blocked message; else show URLs
+    all_nsfw = all((nsfw_flags[i] if i < len(nsfw_flags) else False) for i in range(len(out_urls))) if out_urls else False
+    if all_nsfw:
+        info_md = f"**Prompt:** {prompt}\n\n**Seed:** {seed}\n\n**Blocked for NSFW, image not saved.**"
+        return None, info_md
     info_md = f"**Prompt:** {prompt}\n\n**Seed:** {seed}\n\n**Output URL(s):**\n" + "\n".join(out_urls if out_urls else ['N/A'])
     return (out_imgs[0] if out_imgs else None), info_md
 
 def extract_fal_hash(url):
-    # Extract everything after /koala/ or /files/koala/ in the URL
-    m = re.search(r"(?:/koala/|/files/koala/)([^/?#]+)", url)
+    # Extract everything after /files/<any-animal>/ in the URL
+    m = re.search(r"/files/[^/]+/([^/?#]+)", url)
     if m:
         return m.group(1)
     return None
@@ -400,6 +434,7 @@ def main():
                     guidance_scale = gr.Slider(label="CFG (Guidance Scale)", minimum=1.0, maximum=10.0, step=0.1, value=3.5)
                     output_format = gr.Dropdown(label="Output Format", choices=["jpeg", "png"], value="jpeg")
                     safety = gr.Slider(label="Safety Tolerance (1=Strict, 6=Permissive)", minimum=1, maximum=6, step=1, value=5)
+                    save_input = gr.Checkbox(label="Save Input Image with output", value=False)
             with gr.Column():
                 image = gr.Image(label="Input Image", type="pil", height=512, show_label=True, elem_id="input-image")
                 after = gr.Image(label="Output Image", show_label=True, height=512, elem_id="output-image")
@@ -408,17 +443,17 @@ def main():
                 video_upload = gr.File(label="Upload Video (extract first frame)", file_types=[".mp4", ".mov", ".avi", ".webm"], type="filepath")
                 extract_btn = gr.Button("Extract First Frame from Video")
         last_seed = {"value": default_seed}
-        def run_all(prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output):
+        def run_all(prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input):
             if lock_seed:
                 use_seed = int(seed)
             else:
                 use_seed = random.randint(0, 2**32 - 1)
                 last_seed["value"] = use_seed
-            return process(prompt, raw, image, int(safety), use_seed, float(guidance_scale), int(num_images), output_format, float(image_prompt_strength), int(num_inference_steps), save_output)
+            return process(prompt, raw, image, int(safety), use_seed, float(guidance_scale), int(num_images), output_format, float(image_prompt_strength), int(num_inference_steps), save_output, save_input)
         # Run button click
-        run_btn.click(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output], outputs=[after, info_box])
+        run_btn.click(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box])
         # Prompt box: run on Ctrl+Enter
-        prompt.submit(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output], outputs=[after, info_box], queue=True, preprocess=True)
+        prompt.submit(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box], queue=True, preprocess=True)
         # Video upload: extract first frame and set as image input
         def handle_video_extract(video_path):
             if not video_path:
