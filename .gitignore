@@ -18,10 +18,11 @@ env/
 .idea/
 *.swp
 
-# Kontext UI job/activity logs
+# Kontext UI job/activity logs and outputs
 .active
 activity.log
 old_activity.log
+output/
 
 # OS files
 .DS_Store
