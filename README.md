@@ -10,8 +10,8 @@ Kontext UI is an open source interface for the [Fal Kontext API](https://fal.ai/
 ## Features
 - Edit images using the Fal Kontext API with a simple UI
 - Upload local images or use image URLs (images are sent directly as base64 Data URIs)
-- **NEW:** Upload a video and extract the first frame to use as the input image for editing (supports mp4, mov, avi, webm)
-- Tracks all in-progress jobs in a `.active` file (never pushed to git)
+- Upload a video and extract the first frame to use as the input image for editing (supports mp4, mov, avi, webm)
+- Tracks all in-progress jobs in a local `.active` file
 - Resumes and saves results for any jobs left in progress if the app restarts
 - Logs all activity (prompt, input URL, output URL) to a rolling `activity.log` (with backup)
 - Ensures all output images are saved locally if the 'Save output image' box is checked
