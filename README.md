@@ -60,7 +60,16 @@ Run the app with:
 python kontext-ui.py --verbose
 ```
 
-- The UI will be available at the address shown in the terminal (default: http://localhost:7500)
+### Host and Port Options
+You can specify the network interface and port for the Gradio UI using `--host` and `--port`:
+
+```sh
+python kontext-ui.py --host 0.0.0.0 --port 7500
+```
+- `--host` (default: `0.0.0.0`) sets the network interface to listen on (e.g., `127.0.0.1` for localhost only).
+- `--port` (default: `7500`) sets the port for the UI.
+
+- The UI will be available at the address shown in the terminal (e.g., http://localhost:7500)
 - All in-progress jobs are tracked in `.active` and will be resumed on startup
 - All activity is logged to `activity.log` (rolls over to `old_activity.log` at 10MB)
 - Output images are saved to the `output/YYYYMMDD/` directory if 'Save output image' is checked
