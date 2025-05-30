@@ -435,13 +435,13 @@ def main():
                     output_format = gr.Dropdown(label="Output Format", choices=["jpeg", "png"], value="jpeg")
                     safety = gr.Slider(label="Safety Tolerance (1=Strict, 6=Permissive)", minimum=1, maximum=6, step=1, value=5)
                     save_input = gr.Checkbox(label="Save Input Image with output", value=False)
+                video_upload = gr.File(label="Upload Video (extract first frame)", file_types=[".mp4", ".mov", ".avi", ".webm"], type="filepath")
+                extract_btn = gr.Button("Extract First Frame from Video")
             with gr.Column():
                 image = gr.Image(label="Input Image", type="pil", height=512, show_label=True, elem_id="input-image")
                 after = gr.Image(label="Output Image", show_label=True, height=512, elem_id="output-image")
                 save_output = gr.Checkbox(label="Save output image", value=True)
                 info_box = gr.Markdown("", elem_id="output-info")
-                video_upload = gr.File(label="Upload Video (extract first frame)", file_types=[".mp4", ".mov", ".avi", ".webm"], type="filepath")
-                extract_btn = gr.Button("Extract First Frame from Video")
         last_seed = {"value": default_seed}
         def run_all(prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, image_prompt_strength, num_inference_steps, save_output, save_input):
             if lock_seed:
