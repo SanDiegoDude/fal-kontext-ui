@@ -270,7 +270,7 @@ def extract_first_frame_from_video(video_path):
 
 def main():
     global VERBOSE
-    parser = argparse.ArgumentParser(description="Kontext UI - Open Source Fal Kontext Demo")
+    parser = argparse.ArgumentParser(description="Kontext UI - Fal Kontext Evaluation UI")
     parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to serve on')
     parser.add_argument('--port', type=int, default=7500, help='Port to serve on')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose debug output')
