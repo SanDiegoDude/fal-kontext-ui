@@ -1,0 +1,5 @@
+output/
+venv/ activity.log
+old_activity.log
+.active
+activity.log
