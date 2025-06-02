@@ -17,14 +17,13 @@ import sys
 import cv2
 
 VERBOSE = False
+FAL_KEY = None
 
 def debug(msg):
     if VERBOSE:
         print(f"[DEBUG] {msg}")
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
-IMG_API_URL = "https://api.imgbb.com/1/upload"
-IMG_EXPIRATION_TIME = 300  # 5 minutes
 
 ACTIVE_JOBS_FILE = ".active"
 ACTIVITY_LOG_FILE = "activity.log"
@@ -32,30 +31,6 @@ OLD_ACTIVITY_LOG_FILE = "old_activity.log"
 MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
 
 MAX_PIXELS = 1240000  # 1.24MP
-
-def get_imgbb_api_key():
-    key = os.environ.get("IMGBB_API_KEY")
-    if not key:
-        raise EnvironmentError("IMGBB_API_KEY not set in environment.")
-    return key
-
-def upload_image_to_imgbb(local_image_path: str) -> str:
-    imgbb_key = get_imgbb_api_key()
-    filename = os.path.basename(local_image_path)
-    with open(local_image_path, "rb") as img_file:
-        base64_image = base64.b64encode(img_file.read()).decode("utf-8")
-    url = f"{IMG_API_URL}?key={imgbb_key}&expiration={IMG_EXPIRATION_TIME}"
-    payload = {"image": base64_image}
-    debug(f"Uploading {filename} to ImgBB...")
-    response = requests.post(url, data=payload)
-    result = response.json()
-    if result.get("success"):
-        image_url = result["data"]["url"]
-        debug(f"{filename} uploaded to ImgBB: {image_url}")
-        return image_url
-    else:
-        error_message = result.get("error", {}).get("message", "Unknown error")
-        raise ValueError(f"ImgBB upload error: {error_message}")
 
 def ensure_gitignore():
     gi_path = ".gitignore"
@@ -142,6 +117,7 @@ def process_active_jobs_on_startup():
             debug(f"Error resuming job {request_id}: {e}")
 
 def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, output_format, raw, output_aspect, image_size, aspect_ratio, image_prompt_strength, num_inference_steps):
+    debug(f"call_kontext starting with FAL_KEY in env: {bool(os.environ.get('FAL_KEY'))}")
     payload = {
         "prompt": prompt,
         "image_url": image_url,
@@ -173,13 +149,25 @@ def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, ou
         job_id_holder['id'] = request_id
     def on_queue_update(update):
         debug(f"Queue update: {update}")
-    result = fal_client.subscribe(
-        "fal-ai/flux-pro/kontext",
-        arguments=payload,
-        with_logs=VERBOSE,
-        on_enqueue=on_enqueue,
-        on_queue_update=on_queue_update if VERBOSE else None,
-    )
+    
+    try:
+        debug(f"Calling fal_client.subscribe...")
+        result = fal_client.subscribe(
+            "fal-ai/flux-pro/kontext",
+            arguments=payload,
+            with_logs=VERBOSE,
+            on_enqueue=on_enqueue,
+            on_queue_update=on_queue_update if VERBOSE else None,
+        )
+        debug(f"API response received")
+    except Exception as e:
+        debug(f"API call failed with error: {type(e).__name__}: {str(e)}")
+        print(f"[ERROR] API call failed: {type(e).__name__}: {str(e)}")
+        if "unauthorized" in str(e).lower() or "401" in str(e):
+            print("[ERROR] Authentication failed. Your FAL_KEY may be invalid.")
+            print("[ERROR] Delete the .fal_key file and restart to enter a new key.")
+        raise
+    
     debug(f"API response: {result}")
     api_result_holder['result'] = result
     images_out = []
@@ -311,16 +299,28 @@ def extract_fal_hash(url):
     return None
 
 def ensure_env_var(var_name, prompt_text):
+    debug(f"ensure_env_var called for {var_name}")
     value = os.environ.get(var_name)
     if value:
+        debug(f"{var_name} found in environment: {'*' * min(4, len(value))}...{value[-4:] if len(value) > 4 else ''}")
         return value
+    debug(f"{var_name} not found in environment")
+    
     key_file = ".fal_key"
+    debug(f"Checking for {key_file} file...")
     if os.path.exists(key_file):
+        debug(f"{key_file} file exists, attempting to read...")
         with open(key_file, "r") as f:
             value = f.read().strip()
             if value:
+                debug(f"Found value in {key_file}: {'*' * min(4, len(value))}...{value[-4:] if len(value) > 4 else ''}")
                 os.environ[var_name] = value
                 return value
+            else:
+                debug(f"{key_file} file exists but is empty")
+    else:
+        debug(f"{key_file} file does not exist")
+    
     # Prompt user for the value
     print(f"[Kontext UI] {var_name} not found in environment or .fal_key file.")
     value = input(f"Please enter your {prompt_text}: ").strip()
@@ -328,10 +328,8 @@ def ensure_env_var(var_name, prompt_text):
     with open(key_file, "w") as f:
         f.write(value)
     print(f"[Kontext UI] {var_name} saved to {key_file} for future runs.")
+    debug(f"New {var_name} saved to {key_file}")
     return value
-
-# Only check for FAL_KEY now
-FAL_KEY = ensure_env_var("FAL_KEY", "Fal API key")
 
 def extract_first_frame_from_video(video_path, rotate_degrees=0):
     cap = cv2.VideoCapture(video_path)
@@ -346,14 +344,81 @@ def extract_first_frame_from_video(video_path, rotate_degrees=0):
     img = resize_to_max_pixels(img)
     return img
 
+def clear_fal_key():
+    """Clear FAL_KEY from environment and delete .fal_key file"""
+    debug("clear_fal_key called")
+    
+    # Ask for confirmation
+    print("\n[WARNING] This will:")
+    print("  1. Delete the .fal_key file")
+    print("  2. Clear FAL_KEY from the current environment")
+    print("  3. Prompt you to enter a new key")
+    response = input("\nAre you sure you want to clear the FAL key? (yes/no): ").strip().lower()
+    
+    if response != "yes":
+        print("Operation cancelled.")
+        return False
+    
+    # Clear from environment
+    if "FAL_KEY" in os.environ:
+        del os.environ["FAL_KEY"]
+        debug("FAL_KEY cleared from environment")
+        print("✓ FAL_KEY cleared from environment")
+    else:
+        debug("FAL_KEY was not in environment")
+    
+    # Delete .fal_key file
+    key_file = ".fal_key"
+    if os.path.exists(key_file):
+        try:
+            os.remove(key_file)
+            debug(f"{key_file} file deleted")
+            print(f"✓ {key_file} file deleted")
+        except Exception as e:
+            print(f"[ERROR] Failed to delete {key_file}: {e}")
+            return False
+    else:
+        debug(f"{key_file} file did not exist")
+        print(f"  {key_file} file did not exist")
+    
+    print("\nFAL key cleared successfully.")
+    return True
+
 def main():
-    global VERBOSE
+    global VERBOSE, FAL_KEY
     parser = argparse.ArgumentParser(description="Kontext UI - Fal Kontext Evaluation UI")
     parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to serve on')
     parser.add_argument('--port', type=int, default=7500, help='Port to serve on')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose debug output')
+    parser.add_argument('--clearkey', action='store_true', help='Clear FAL_KEY from environment and file, then prompt for new key')
     args = parser.parse_args()
     VERBOSE = args.verbose
+
+    # Handle --clearkey argument
+    if args.clearkey:
+        if clear_fal_key():
+            print("\nNow prompting for new FAL key...")
+        else:
+            print("\nExiting without changes.")
+            sys.exit(0)
+    
+    # Initialize FAL_KEY
+    FAL_KEY = ensure_env_var("FAL_KEY", "Fal API key")
+    debug(f"FAL_KEY set: {bool(FAL_KEY)}")
+    
+    # Ensure fal_client uses the FAL_KEY
+    if FAL_KEY:
+        os.environ["FAL_KEY"] = FAL_KEY
+        debug(f"FAL_KEY explicitly set in os.environ")
+        # Some fal_client versions might need explicit configuration
+        try:
+            fal_client.api_key = FAL_KEY
+            debug(f"fal_client.api_key set directly")
+        except AttributeError:
+            debug(f"fal_client doesn't have api_key attribute, relying on environment variable")
+    else:
+        print("[ERROR] Failed to set FAL_KEY. Exiting.")
+        sys.exit(1)
 
     # Randomize default seed on UI load
     default_seed = random.randint(0, 2**32 - 1)
