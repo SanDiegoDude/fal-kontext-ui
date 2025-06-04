@@ -331,7 +331,7 @@ def ensure_env_var(var_name, prompt_text):
     debug(f"New {var_name} saved to {key_file}")
     return value
 
-def extract_first_frame_from_video(video_path, rotate_degrees=0):
+def extract_first_frame_from_video(video_path):
     cap = cv2.VideoCapture(video_path)
     success, frame = cap.read()
     cap.release()
@@ -339,10 +339,24 @@ def extract_first_frame_from_video(video_path, rotate_degrees=0):
         raise ValueError("Could not read first frame from video.")
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     img = Image.fromarray(frame_rgb)
-    if rotate_degrees in [90, 180, 270]:
-        img = img.rotate(-rotate_degrees, expand=True)  # PIL rotates counterclockwise, so negative for clockwise
     img = resize_to_max_pixels(img)
     return img
+
+def transform_image(img, transformation):
+    """Apply transformation to image"""
+    if not isinstance(img, Image.Image):
+        return img
+    
+    if transformation == "Rotate Input Image Left (90°)":
+        return img.rotate(90, expand=True)
+    elif transformation == "Rotate Input Image Right (90°)":
+        return img.rotate(-90, expand=True)
+    elif transformation == "Flip Input Image Horizontal":
+        return img.transpose(Image.FLIP_LEFT_RIGHT)
+    elif transformation == "Flip Input Image Vertical":
+        return img.transpose(Image.FLIP_TOP_BOTTOM)
+    else:
+        return img
 
 def clear_fal_key():
     """Clear FAL_KEY from environment and delete .fal_key file"""
@@ -437,6 +451,12 @@ def main():
     max-height: 128px !important;
     line-height: 2.5em !important;
 }
+#transform-btn {
+    height: 48px !important;
+    min-height: 48px !important;
+    font-size: 1em !important;
+    line-height: 1.5em !important;
+}
 #prompt-row {
     background: #1a3321 !important;
     border-radius: 8px;
@@ -480,6 +500,20 @@ def main():
     align-items: center;
     justify-content: flex-end;
 }
+.transform-row {
+    align-items: center !important;
+    display: flex !important;
+}
+.transform-row > div {
+    display: flex !important;
+    align-items: center !important;
+}
+.transform-row .gradio-dropdown {
+    margin-top: 0 !important;
+}
+.transform-row .gradio-dropdown label {
+    display: none !important;
+}
 </style>
 """)
         with gr.Row():
@@ -508,11 +542,17 @@ def main():
                     safety = gr.Slider(label="Safety Tolerance (1=Strict, 6=Permissive)", minimum=1, maximum=6, step=1, value=5)
                     save_input = gr.Checkbox(label="Save Input Image with output", value=False)
                 video_upload = gr.File(label="Upload Video (extract first frame)", file_types=[".mp4", ".mov", ".avi", ".webm"], type="filepath")
-                rotate_choices = [0, 90, 180, 270]
-                rotate_dropdown = gr.Dropdown(label="Rotate Frame Degrees", choices=rotate_choices, value=0)
                 extract_btn = gr.Button("Extract First Frame from Video")
             with gr.Column():
                 image = gr.Image(label="Input Image", type="pil", height=512, show_label=True, elem_id="input-image")
+                # Image transformation controls
+                with gr.Row(elem_classes=["transform-row"]):
+                    transform_dropdown = gr.Dropdown(
+                        label="",
+                        choices=["Rotate Input Image Left (90°)", "Rotate Input Image Right (90°)", "Flip Input Image Horizontal", "Flip Input Image Vertical"], 
+                        value="Rotate Input Image Left (90°)"
+                    )
+                    transform_btn = gr.Button("Transform", elem_id="transform-btn")
                 after = gr.Gallery(label="Output Images", show_label=True, height=512, elem_id="output-image", columns=[2])
                 save_output = gr.Checkbox(label="Save output image", value=True)
                 info_box = gr.Markdown("", elem_id="output-info")
@@ -542,16 +582,29 @@ def main():
         # Prompt box: run on Ctrl+Enter
         prompt.submit(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, output_aspect, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box, seed], queue=True, preprocess=True)
         # Video upload: extract first frame and set as image input
-        def handle_video_extract(video_path, rotate_degrees):
+        def handle_video_extract(video_path):
             if not video_path:
                 return gr.update()
             try:
-                img = extract_first_frame_from_video(video_path, rotate_degrees)
+                img = extract_first_frame_from_video(video_path)
                 return img
             except Exception as e:
                 print(f"[ERROR] Could not extract frame: {e}")
                 return gr.update()
-        extract_btn.click(handle_video_extract, inputs=[video_upload, rotate_dropdown], outputs=[image])
+
+        # Transform button handler
+        def handle_transform(current_image, transformation):
+            if current_image is None:
+                return gr.update()
+            try:
+                transformed_img = transform_image(current_image, transformation)
+                return transformed_img
+            except Exception as e:
+                print(f"[ERROR] Could not transform image: {e}")
+                return gr.update()
+
+        extract_btn.click(handle_video_extract, inputs=[video_upload], outputs=[image])
+        transform_btn.click(handle_transform, inputs=[image, transform_dropdown], outputs=[image])
     # Ensure .gitignore is updated and process active jobs on startup
     ensure_gitignore()
     process_active_jobs_on_startup()
