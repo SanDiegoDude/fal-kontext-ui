@@ -12,6 +12,10 @@ Kontext UI is an open source interface for the [Fal Kontext API](https://fal.ai/
 - Edit images using the Fal Kontext API with a simple UI
 - Upload local images or use image URLs (images are sent directly as base64 Data URIs)
 - Upload a video and extract the first frame to use as the input image for editing (supports mp4, mov, avi, webm)
+- **Transform input images** with rotation and flipping options before sending to the API:
+  - Rotate Input Image Left (90°) / Right (90°)
+  - Flip Input Image Horizontal / Vertical
+  - Apply transformations repeatedly (e.g., rotate left 4 times returns to original)
 - Tracks all in-progress jobs in a local `.active` file
 - Resumes and saves results for any jobs left in progress if the app restarts
 - Logs all activity (prompt, input URL, output URL) to a rolling `activity.log` (with backup)
@@ -66,6 +70,11 @@ $env:FAL_KEY="your_fal_api_key"
 On first run, the app will prompt you for your Fal API key and store it in a local hidden file called `.fal_key` in the project root. This file is used for all future runs and is ignored by git (not committed to version control).
 
 - If you want to change the key, simply delete the `.fal_key` file and restart the app.
+- **Alternatively, use the `--clearkey` option to safely clear and reset your API key:**
+  ```sh
+  python kontext-ui.py --clearkey
+  ```
+  This will delete the `.fal_key` file, clear the key from memory, and prompt you to enter a new key.
 - If you set the `FAL_KEY` environment variable, it will override the value in `.fal_key`.
 - **Do not share your `.fal_key` file.**
 
@@ -90,6 +99,11 @@ python kontext-ui.py --host 0.0.0.0 --port 7500
 - All activity is logged to `activity.log` (rolls over to `old_activity.log` at 10MB)
 - Output images are saved to the `output/YYYYMMDD/` directory if 'Save output image' is checked
 - **To use the video-to-image feature:** Upload a video file, click "Extract First Frame from Video", and the first frame will be set as the input image for editing
+- **Image Transformations:** After loading an input image, use the transformation dropdown and "Transform" button to:
+  - Rotate the image left or right (90° increments)
+  - Flip the image horizontally or vertically
+  - Apply multiple transformations (transformations are cumulative and repeatable)
+  - The transformed image updates in real-time and will be used for API processing
 - **Output Aspect Ratio:** Use the dropdown in Additional Settings to match the input image's aspect ratio or select a preset (e.g., 16:9, 4:3, 1:1, etc.).
 - **Batch Output:** When generating multiple images, all outputs are shown in a grid below the input image.
 - **Seed Handling:** The seed input will update to the actual seed used after each run, unless 'Lock Seed' is checked.
