@@ -514,7 +514,66 @@ def main():
 .transform-row .gradio-dropdown label {
     display: none !important;
 }
+#input-image {
+    position: relative;
+}
+#input-image:focus {
+    outline: 2px solid #FFD600;
+}
+.paste-info {
+    font-size: 0.9em;
+    color: #888;
+    margin-top: 8px;
+    text-align: center;
+}
+
 </style>
+
+<script>
+// Simple enhancement for better UX
+function setupSimpleEnhancements() {
+    setTimeout(() => {
+        const imageContainer = document.querySelector('#input-image');
+        if (imageContainer) {
+            // Add better visual feedback for drag and drop
+            let dragCounter = 0;
+            
+            ['dragenter', 'dragover'].forEach(eventName => {
+                document.addEventListener(eventName, (e) => {
+                    if (e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files')) {
+                        e.preventDefault();
+                        dragCounter++;
+                        imageContainer.style.border = '3px dashed #FFD600';
+                        imageContainer.style.backgroundColor = 'rgba(255, 214, 0, 0.1)';
+                    }
+                });
+            });
+            
+            ['dragleave', 'drop'].forEach(eventName => {
+                document.addEventListener(eventName, (e) => {
+                    if (e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files')) {
+                        dragCounter--;
+                        if (dragCounter <= 0) {
+                            dragCounter = 0;
+                            imageContainer.style.border = '';
+                            imageContainer.style.backgroundColor = '';
+                        }
+                    }
+                });
+            });
+            
+            console.log('Simple drag/drop enhancements loaded');
+        }
+    }, 1000);
+}
+
+// Initialize
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setupSimpleEnhancements);
+} else {
+    setupSimpleEnhancements();
+}
+</script>
 """)
         with gr.Row():
             with gr.Column():
@@ -544,7 +603,7 @@ def main():
                 video_upload = gr.File(label="Upload Video (extract first frame)", file_types=[".mp4", ".mov", ".avi", ".webm"], type="filepath")
                 extract_btn = gr.Button("Extract First Frame from Video")
             with gr.Column():
-                image = gr.Image(label="Input Image", type="pil", height=512, show_label=True, elem_id="input-image")
+                image = gr.Image(label="Input Image", type="pil", height=512, show_label=True, elem_id="input-image", sources=["upload", "webcam", "clipboard"])
                 # Image transformation controls
                 with gr.Row(elem_classes=["transform-row"]):
                     transform_dropdown = gr.Dropdown(
