@@ -271,6 +271,8 @@ def process(prompt: str, raw: bool, images: Union[Image.Image, List[Image.Image]
         temp_files = []
         for img in images:
             if isinstance(img, Image.Image):
+                # Resize image before uploading
+                img = resize_to_max_pixels(img)
                 # Save to temp file
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
                     img.save(tmp, format='PNG')
