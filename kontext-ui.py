@@ -15,6 +15,7 @@ import shutil
 import time
 import sys
 import cv2
+from typing import List, Optional, Tuple, Union
 
 VERBOSE = False
 FAL_KEY = None
@@ -25,12 +26,16 @@ def debug(msg):
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
-ACTIVE_JOBS_FILE = ".active"
 ACTIVITY_LOG_FILE = "activity.log"
 OLD_ACTIVITY_LOG_FILE = "old_activity.log"
 MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
 
 MAX_PIXELS = 1240000  # 1.24MP
+MAX_INPUT_IMAGES = 4  # Maximum number of input images for multi-image mode
+
+# API endpoints
+KONTEXT_ENDPOINT = "fal-ai/flux-pro/kontext"
+KONTEXT_MAX_ENDPOINT = "fal-ai/flux-pro/kontext/max/multi"
 
 def ensure_gitignore():
     gi_path = ".gitignore"
@@ -38,32 +43,12 @@ def ensure_gitignore():
     if os.path.exists(gi_path):
         with open(gi_path, "r") as f:
             lines = set(l.strip() for l in f)
-    needed = {ACTIVE_JOBS_FILE, ACTIVITY_LOG_FILE, OLD_ACTIVITY_LOG_FILE}
+    needed = {ACTIVITY_LOG_FILE, OLD_ACTIVITY_LOG_FILE}
     if not needed.issubset(lines):
         with open(gi_path, "a") as f:
             for n in needed:
                 if n not in lines:
                     f.write(f"{n}\n")
-
-def append_active_job(request_id, prompt, input_url):
-    with open(ACTIVE_JOBS_FILE, "a") as f:
-        f.write(f"{request_id},{int(time.time())},{prompt.replace(',', ' ')},{input_url}\n")
-
-def remove_active_job(request_id):
-    if not os.path.exists(ACTIVE_JOBS_FILE):
-        return
-    with open(ACTIVE_JOBS_FILE, "r") as f:
-        lines = f.readlines()
-    with open(ACTIVE_JOBS_FILE, "w") as f:
-        for line in lines:
-            if not line.startswith(f"{request_id},"):
-                f.write(line)
-
-def list_active_jobs():
-    if not os.path.exists(ACTIVE_JOBS_FILE):
-        return []
-    with open(ACTIVE_JOBS_FILE, "r") as f:
-        return [line.strip().split(",", 3) for line in f if line.strip()]
 
 def log_activity(prompt, output_url, nsfw_flagged):
     # Roll log if needed
@@ -116,11 +101,15 @@ def process_active_jobs_on_startup():
         except Exception as e:
             debug(f"Error resuming job {request_id}: {e}")
 
-def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, output_format, raw, output_aspect, image_size, aspect_ratio, image_prompt_strength, num_inference_steps):
-    debug(f"call_kontext starting with FAL_KEY in env: {bool(os.environ.get('FAL_KEY'))}")
+def call_kontext_max(prompt: str, image_urls: List[str], safety: int, seed: int, guidance_scale: float, 
+                     num_images: int, output_format: str, raw: bool, output_aspect: str, 
+                     image_size: Optional[dict], aspect_ratio: Optional[str], 
+                     image_prompt_strength: float, num_inference_steps: int) -> Tuple[List[Image.Image], List[str]]:
+    """Call the Kontext Max API with multiple input images."""
+    debug(f"call_kontext_max starting with {len(image_urls)} input images")
     payload = {
         "prompt": prompt,
-        "image_url": image_url,
+        "image_urls": image_urls,
         "safety_tolerance": str(safety),
         "seed": int(seed),
         "guidance_scale": float(guidance_scale),
@@ -134,29 +123,22 @@ def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, ou
         payload["image_size"] = image_size
     elif aspect_ratio:
         payload["aspect_ratio"] = aspect_ratio
-    # Verbose logging: print payload with base64 image replaced
+
     if VERBOSE:
         payload_log = payload.copy()
-        if isinstance(payload_log.get("image_url"), str) and payload_log["image_url"].startswith("data:image/"):
-            payload_log["image_url"] = "(base64 image)"
+        payload_log["image_urls"] = [url if not url.startswith("data:image/") else "(base64 image)" for url in image_urls]
         print(f"[VERBOSE] Upload payload: {payload_log}")
-    # Note: The API currently only supports one input image (image_url). Multi-image input is not supported as of now.
-    job_id_holder = {}
+
     api_result_holder = {}
-    def on_enqueue(request_id):
-        debug(f"Request enqueued with ID: {request_id}")
-        append_active_job(request_id, prompt, image_url)
-        job_id_holder['id'] = request_id
     def on_queue_update(update):
         debug(f"Queue update: {update}")
     
     try:
-        debug(f"Calling fal_client.subscribe...")
+        debug(f"Calling fal_client.subscribe for Kontext Max...")
         result = fal_client.subscribe(
-            "fal-ai/flux-pro/kontext",
+            KONTEXT_MAX_ENDPOINT,
             arguments=payload,
             with_logs=VERBOSE,
-            on_enqueue=on_enqueue,
             on_queue_update=on_queue_update if VERBOSE else None,
         )
         debug(f"API response received")
@@ -182,15 +164,78 @@ def call_kontext(prompt, image_url, safety, seed, guidance_scale, num_images, ou
                     response = requests.get(output_url)
                     images_out.append(Image.open(io.BytesIO(response.content)))
                     urls_out.append(output_url)
-    # Remove from .active if job_id is known
-    if 'id' in job_id_holder:
-        remove_active_job(job_id_holder['id'])
+    
+    # Store the last API result for NSFW checking
+    call_kontext_max.last_api_result = api_result_holder['result']
+    return images_out, urls_out
+
+def call_kontext(prompt: str, image_url: str, safety: int, seed: int, guidance_scale: float, 
+                 num_images: int, output_format: str, raw: bool, output_aspect: str, 
+                 image_size: Optional[dict], aspect_ratio: Optional[str], 
+                 image_prompt_strength: float, num_inference_steps: int) -> Tuple[List[Image.Image], List[str]]:
+    """Call the standard Kontext API with a single input image."""
+    debug(f"call_kontext starting with FAL_KEY in env: {bool(os.environ.get('FAL_KEY'))}")
+    payload = {
+        "prompt": prompt,
+        "image_url": image_url,
+        "safety_tolerance": str(safety),
+        "seed": int(seed),
+        "guidance_scale": float(guidance_scale),
+        "num_images": int(num_images),
+        "output_format": output_format,
+        "raw": bool(raw),
+        "image_prompt_strength": float(image_prompt_strength),
+        "num_inference_steps": int(num_inference_steps)
+    }
+    if image_size:
+        payload["image_size"] = image_size
+    elif aspect_ratio:
+        payload["aspect_ratio"] = aspect_ratio
+
+    if VERBOSE:
+        payload_log = payload.copy()
+        if isinstance(payload_log.get("image_url"), str) and payload_log["image_url"].startswith("data:image/"):
+            payload_log["image_url"] = "(base64 image)"
+        print(f"[VERBOSE] Upload payload: {payload_log}")
+
+    api_result_holder = {}
+    def on_queue_update(update):
+        debug(f"Queue update: {update}")
+    
+    try:
+        debug(f"Calling fal_client.subscribe...")
+        result = fal_client.subscribe(
+            KONTEXT_ENDPOINT,
+            arguments=payload,
+            with_logs=VERBOSE,
+            on_queue_update=on_queue_update if VERBOSE else None,
+        )
+        debug(f"API response received")
+    except Exception as e:
+        debug(f"API call failed with error: {type(e).__name__}: {str(e)}")
+        print(f"[ERROR] API call failed: {type(e).__name__}: {str(e)}")
+        if "unauthorized" in str(e).lower() or "401" in str(e):
+            print("[ERROR] Authentication failed. Your FAL_KEY may be invalid.")
+            print("[ERROR] Delete the .fal_key file and restart to enter a new key.")
+        raise
+    
+    debug(f"API response: {result}")
+    api_result_holder['result'] = result
+    images_out = []
+    urls_out = []
+    if isinstance(result, dict):
+        images = result.get('images')
+        if images and isinstance(images, list):
+            for img in images:
+                if 'url' in img:
+                    output_url = img['url']
+                    debug(f"Fetching output image from {output_url}")
+                    response = requests.get(output_url)
+                    images_out.append(Image.open(io.BytesIO(response.content)))
+                    urls_out.append(output_url)
+    
     # Store the last API result for NSFW checking
     call_kontext.last_api_result = api_result_holder['result']
-    print(f"[DEBUG] out_imgs type: {type(images_out)}, length: {len(images_out) if hasattr(images_out, '__len__') else 'N/A'}")
-    print(f"[DEBUG] out_urls type: {type(urls_out)}, length: {len(urls_out) if hasattr(urls_out, '__len__') else 'N/A'}")
-    print(f"[DEBUG] out_imgs contents: {images_out}")
-    print(f"[DEBUG] out_urls contents: {urls_out}")
     return images_out, urls_out
 
 def resize_to_max_pixels(img: Image.Image, max_pixels=MAX_PIXELS) -> Image.Image:
@@ -211,28 +256,76 @@ def image_to_data_uri(img: Image.Image, format: str = "PNG") -> str:
     base64_str = base64.b64encode(img_bytes).decode("utf-8")
     return f"data:image/{format.lower()};base64,{base64_str}"
 
-def process(prompt, raw, image, safety, seed, guidance_scale, num_images, output_format, output_aspect, image_size, aspect_ratio, image_prompt_strength, num_inference_steps, save_output, save_input):
-    if isinstance(image, Image.Image):
-        # Resize before encoding
-        image = resize_to_max_pixels(image)
-        data_uri = image_to_data_uri(image, format='PNG')
-        url = data_uri
-    elif isinstance(image, str) and image.startswith("http"):
-        url = image
+def process(prompt: str, raw: bool, images: Union[Image.Image, List[Image.Image]], safety: int, 
+           seed: int, guidance_scale: float, num_images: int, output_format: str, 
+           output_aspect: str, image_size: Optional[dict], aspect_ratio: Optional[str], 
+           image_prompt_strength: float, num_inference_steps: int, save_output: bool, 
+           save_input: bool, is_multi_mode: bool = False) -> Tuple[List[Image.Image], str]:
+    """Process images with the Kontext API, supporting both single and multi-image modes."""
+    if is_multi_mode:
+        if not isinstance(images, list):
+            images = [images] if images else []
+        # Filter out None values and convert images to URLs
+        image_urls = []
+        valid_images = []
+        temp_files = []
+        for img in images:
+            if isinstance(img, Image.Image):
+                # Save to temp file
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    img.save(tmp, format='PNG')
+                    temp_path = tmp.name
+                temp_files.append(temp_path)
+                # Upload to Fal storage
+                try:
+                    url = fal_client.upload_file(temp_path)
+                    image_urls.append(url)
+                    valid_images.append(img)
+                except Exception as e:
+                    debug(f"Failed to upload image to Fal storage: {e}")
+            elif isinstance(img, str) and img.startswith("http"):
+                image_urls.append(img)
+                valid_images.append(None)  # We don't have the actual image for HTTP URLs
+        # Clean up temp files
+        for f in temp_files:
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+        if not image_urls:
+            return [], "No valid input images provided."
+        result = call_kontext_max(prompt, image_urls, safety, seed, guidance_scale, num_images, 
+                                output_format, raw, output_aspect, image_size, aspect_ratio, 
+                                image_prompt_strength, num_inference_steps)
     else:
-        return [], ""
-    result = call_kontext(prompt, url, safety, seed, guidance_scale, num_images, output_format, raw, output_aspect, image_size, aspect_ratio, image_prompt_strength, num_inference_steps)
+        if isinstance(images, list):
+            images = images[0] if images else None
+        if isinstance(images, Image.Image):
+            images = resize_to_max_pixels(images)
+            data_uri = image_to_data_uri(images, format='PNG')
+            url = data_uri
+        elif isinstance(images, str) and images.startswith("http"):
+            url = images
+        else:
+            return [], "No valid input image provided."
+        
+        result = call_kontext(prompt, url, safety, seed, guidance_scale, num_images, 
+                            output_format, raw, output_aspect, image_size, aspect_ratio, 
+                            image_prompt_strength, num_inference_steps)
+    
     out_imgs, out_urls = result
     nsfw_flags = []
-    if hasattr(call_kontext, 'last_api_result'):
-        api_result = call_kontext.last_api_result
-        has_nsfw = api_result.get('has_nsfw_concepts') if isinstance(api_result, dict) else None
+    api_result = (call_kontext_max.last_api_result if is_multi_mode else call_kontext.last_api_result)
+    if api_result and isinstance(api_result, dict):
+        has_nsfw = api_result.get('has_nsfw_concepts')
         if has_nsfw:
             nsfw_flags = list(has_nsfw)
+    
     # Log all outputs, even if NSFW
     for i, out_url in enumerate(out_urls):
         nsfw_flagged = nsfw_flags[i] if i < len(nsfw_flags) else False
         log_activity(prompt, out_url, nsfw_flagged)
+    
     # Save images if requested, skipping those flagged as NSFW
     saved_any = False
     if save_output and out_imgs and out_urls:
@@ -240,9 +333,7 @@ def process(prompt, raw, image, safety, seed, guidance_scale, num_images, output
         os.makedirs(outdir, exist_ok=True)
         for i, (img, out_url) in enumerate(zip(out_imgs, out_urls)):
             nsfw_flagged = nsfw_flags[i] if i < len(nsfw_flags) else False
-            print(f"[DEBUG] About to extract fal_hash from out_url: {out_url}")
             fal_hash = extract_fal_hash(out_url)
-            print(f"[DEBUG] Result of extract_fal_hash: {fal_hash}")
             if fal_hash:
                 ext = os.path.splitext(out_url)[1]
                 if not ext:
@@ -257,37 +348,32 @@ def process(prompt, raw, image, safety, seed, guidance_scale, num_images, output
                     continue
                 try:
                     debug(f"Saving output image to: {filename}")
-                    print(f"[DEBUG] Attempting to save output image to: {filename}")
                     img.save(filename)
                     debug(f"Saved output image: {filename}")
-                    print(f"[DEBUG] Saved output image: {filename}")
                     saved_any = True
-                    # Save input image if requested
-                    if save_input:
-                        print(f"[DEBUG] save_input is True. image type: {type(image)}, value: {image}")
-                        if isinstance(image, Image.Image):
-                            input_filename = filename.replace(ext, f"_input{ext}")
-                            try:
-                                print(f"[DEBUG] Attempting to save input image to: {input_filename}")
-                                image.save(input_filename, format=output_format.upper())
-                                debug(f"Saved input image: {input_filename}")
-                                print(f"[DEBUG] Saved input image: {input_filename}")
-                            except Exception as e:
-                                debug(f"Failed to save input image to {input_filename}: {e}")
-                                print(f"[DEBUG] Failed to save input image to {input_filename}: {e}")
-                        else:
-                            print(f"[DEBUG] image is not a PIL.Image.Image, skipping input save.")
+                    # Save input images if requested
+                    if save_input and valid_images:
+                        for j, input_img in enumerate(valid_images):
+                            if input_img is not None:  # Skip HTTP URLs
+                                input_filename = filename.replace(ext, f"_input{j+1}{ext}")
+                                try:
+                                    input_img.save(input_filename, format=output_format.upper())
+                                    debug(f"Saved input image {j+1}: {input_filename}")
+                                except Exception as e:
+                                    debug(f"Failed to save input image {j+1} to {input_filename}: {e}")
                 except Exception as e:
                     debug(f"Failed to save output image to {filename}: {e}")
-                    print(f"[DEBUG] Failed to save output image to {filename}: {e}")
+    
     # Print URLs to CLI
     for out_url in out_urls:
         print(f"Output URL: {out_url}")
+    
     # Info box: if all images are NSFW, show blocked message; else show URLs
     all_nsfw = all((nsfw_flags[i] if i < len(nsfw_flags) else False) for i in range(len(out_urls))) if out_urls else False
     if all_nsfw:
         info_md = f"**Prompt:** {prompt}\n\n**Seed:** {seed}\n\n**Blocked for NSFW, image not saved.**"
         return [], info_md
+    
     info_md = f"**Prompt:** {prompt}\n\n**Seed:** {seed}\n\n**Output URL(s):**\n" + "\n".join(out_urls if out_urls else ['N/A'])
     return out_imgs, info_md
 
@@ -424,7 +510,6 @@ def main():
     if FAL_KEY:
         os.environ["FAL_KEY"] = FAL_KEY
         debug(f"FAL_KEY explicitly set in os.environ")
-        # Some fal_client versions might need explicit configuration
         try:
             fal_client.api_key = FAL_KEY
             debug(f"fal_client.api_key set directly")
@@ -526,44 +611,57 @@ def main():
     margin-top: 8px;
     text-align: center;
 }
-
+.multi-input-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.multi-input-grid .gradio-image {
+    aspect-ratio: 1;
+    object-fit: cover;
+}
+.multi-input-grid .gradio-image img {
+    aspect-ratio: 1;
+    object-fit: cover;
+}
 </style>
 
 <script>
 // Simple enhancement for better UX
 function setupSimpleEnhancements() {
     setTimeout(() => {
-        const imageContainer = document.querySelector('#input-image');
-        if (imageContainer) {
+        const imageContainers = document.querySelectorAll('#input-image, .multi-input-grid .gradio-image');
+        imageContainers.forEach(container => {
             // Add better visual feedback for drag and drop
             let dragCounter = 0;
             
             ['dragenter', 'dragover'].forEach(eventName => {
-                document.addEventListener(eventName, (e) => {
+                container.addEventListener(eventName, (e) => {
                     if (e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files')) {
                         e.preventDefault();
                         dragCounter++;
-                        imageContainer.style.border = '3px dashed #FFD600';
-                        imageContainer.style.backgroundColor = 'rgba(255, 214, 0, 0.1)';
+                        container.style.border = '3px dashed #FFD600';
+                        container.style.backgroundColor = 'rgba(255, 214, 0, 0.1)';
                     }
                 });
             });
             
             ['dragleave', 'drop'].forEach(eventName => {
-                document.addEventListener(eventName, (e) => {
+                container.addEventListener(eventName, (e) => {
                     if (e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files')) {
                         dragCounter--;
                         if (dragCounter <= 0) {
                             dragCounter = 0;
-                            imageContainer.style.border = '';
-                            imageContainer.style.backgroundColor = '';
+                            container.style.border = '';
+                            container.style.backgroundColor = '';
                         }
                     }
                 });
             });
-            
-            console.log('Simple drag/drop enhancements loaded');
-        }
+        });
+        
+        console.log('Simple drag/drop enhancements loaded');
     }, 1000);
 }
 
@@ -575,46 +673,90 @@ if (document.readyState === 'loading') {
 }
 </script>
 """)
-        with gr.Row():
-            with gr.Column():
+        with gr.Tabs() as tabs:
+            with gr.TabItem("Single Input"):
                 with gr.Row():
-                    with gr.Column(scale=1):
-                        num_images = gr.Number(label="Batch Size", value=1, precision=0, interactive=True, minimum=1, maximum=4)
-                    with gr.Column(scale=1):
-                        seed = gr.Number(label="Seed", value=default_seed, precision=0, interactive=True)
-                    with gr.Column(scale=1):
-                        lock_seed = gr.Checkbox(label="Lock Seed", value=False)
-                run_btn = gr.Button("Run", elem_id="run-btn", variant="primary")
-                with gr.Row(elem_id="prompt-row"):
-                    prompt = gr.Textbox(label="Prompt", value="", lines=3, elem_id="prompt-box")
-                raw = gr.Checkbox(label="Disable prompt enhancement", value=False)
-                with gr.Accordion("Additional Settings", open=True):
-                    image_prompt_strength = gr.Slider(label="Prompt Strength", minimum=0.0, maximum=1.0, step=0.01, value=0.1)
-                    num_inference_steps = gr.Slider(label="Steps", minimum=10, maximum=100, step=1, value=28)
-                    guidance_scale = gr.Slider(label="CFG (Guidance Scale)", minimum=1.0, maximum=10.0, step=0.1, value=3.5)
-                    output_format = gr.Dropdown(label="Output Format", choices=["jpeg", "png"], value="jpeg")
-                    aspect_ratio_choices = [
-                        "Match input image",
-                        "21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "9:21"
-                    ]
-                    output_aspect = gr.Dropdown(label="Output Aspect Ratio", choices=aspect_ratio_choices, value="Match input image")
-                    safety = gr.Slider(label="Safety Tolerance (1=Strict, 6=Permissive)", minimum=1, maximum=6, step=1, value=5)
-                    save_input = gr.Checkbox(label="Save Input Image with output", value=False)
-                video_upload = gr.File(label="Upload Video (extract first frame)", file_types=[".mp4", ".mov", ".avi", ".webm"], type="filepath")
-                extract_btn = gr.Button("Extract First Frame from Video")
-            with gr.Column():
-                image = gr.Image(label="Input Image", type="pil", height=512, show_label=True, elem_id="input-image", sources=["upload", "webcam", "clipboard"])
-                # Image transformation controls
-                with gr.Row(elem_classes=["transform-row"]):
-                    transform_dropdown = gr.Dropdown(
-                        label="",
-                        choices=["Rotate Input Image Left (90°)", "Rotate Input Image Right (90°)", "Flip Input Image Horizontal", "Flip Input Image Vertical"], 
-                        value="Rotate Input Image Left (90°)"
-                    )
-                    transform_btn = gr.Button("Transform", elem_id="transform-btn")
-                after = gr.Gallery(label="Output Images", show_label=True, height=512, elem_id="output-image", columns=[2])
-                save_output = gr.Checkbox(label="Save output image", value=True)
-                info_box = gr.Markdown("", elem_id="output-info")
+                    with gr.Column():
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                num_images = gr.Number(label="Batch Size", value=1, precision=0, interactive=True, minimum=1, maximum=4)
+                            with gr.Column(scale=1):
+                                seed = gr.Number(label="Seed", value=default_seed, precision=0, interactive=True)
+                            with gr.Column(scale=1):
+                                lock_seed = gr.Checkbox(label="Lock Seed", value=False)
+                        run_btn = gr.Button("Run", elem_id="run-btn", variant="primary")
+                        with gr.Row(elem_id="prompt-row"):
+                            prompt = gr.Textbox(label="Prompt", value="", lines=3, elem_id="prompt-box")
+                        raw = gr.Checkbox(label="Disable prompt enhancement", value=False)
+                        with gr.Accordion("Additional Settings", open=True):
+                            image_prompt_strength = gr.Slider(label="Prompt Strength", minimum=0.0, maximum=1.0, step=0.01, value=0.1)
+                            num_inference_steps = gr.Slider(label="Steps", minimum=10, maximum=100, step=1, value=28)
+                            guidance_scale = gr.Slider(label="CFG (Guidance Scale)", minimum=1.0, maximum=10.0, step=0.1, value=3.5)
+                            output_format = gr.Dropdown(label="Output Format", choices=["jpeg", "png"], value="jpeg")
+                            aspect_ratio_choices = [
+                                "Match input image",
+                                "21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "9:21"
+                            ]
+                            output_aspect = gr.Dropdown(label="Output Aspect Ratio", choices=aspect_ratio_choices, value="Match input image")
+                            safety = gr.Slider(label="Safety Tolerance (1=Strict, 6=Permissive)", minimum=1, maximum=6, step=1, value=5)
+                            save_input = gr.Checkbox(label="Save Input Image with output", value=False)
+                        video_upload = gr.File(label="Upload Video (extract first frame)", file_types=[".mp4", ".mov", ".avi", ".webm"], type="filepath")
+                        extract_btn = gr.Button("Extract First Frame from Video")
+                    with gr.Column():
+                        image = gr.Image(label="Input Image", type="pil", height=512, show_label=True, elem_id="input-image", sources=["upload", "webcam", "clipboard"])
+                        # Image transformation controls
+                        with gr.Row(elem_classes=["transform-row"]):
+                            transform_dropdown = gr.Dropdown(
+                                label="",
+                                choices=["Rotate Input Image Left (90°)", "Rotate Input Image Right (90°)", "Flip Input Image Horizontal", "Flip Input Image Vertical"], 
+                                value="Rotate Input Image Left (90°)"
+                            )
+                            transform_btn = gr.Button("Transform", elem_id="transform-btn")
+                        after = gr.Gallery(label="Output Images", show_label=True, height=512, elem_id="output-image", columns=[2])
+                        save_output = gr.Checkbox(label="Save output image", value=True)
+                        info_box = gr.Markdown("", elem_id="output-info")
+
+            with gr.TabItem("Multiple Input"):
+                with gr.Row():
+                    with gr.Column():
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                num_images_multi = gr.Number(label="Batch Size", value=1, precision=0, interactive=True, minimum=1, maximum=4)
+                            with gr.Column(scale=1):
+                                seed_multi = gr.Number(label="Seed", value=default_seed, precision=0, interactive=True)
+                            with gr.Column(scale=1):
+                                lock_seed_multi = gr.Checkbox(label="Lock Seed", value=False)
+                        run_btn_multi = gr.Button("Run", elem_id="run-btn", variant="primary")
+                        with gr.Row(elem_id="prompt-row"):
+                            prompt_multi = gr.Textbox(label="Prompt", value="", lines=3, elem_id="prompt-box")
+                        raw_multi = gr.Checkbox(label="Disable prompt enhancement", value=False)
+                        with gr.Accordion("Additional Settings", open=True):
+                            image_prompt_strength_multi = gr.Slider(label="Prompt Strength", minimum=0.0, maximum=1.0, step=0.01, value=0.1)
+                            num_inference_steps_multi = gr.Slider(label="Steps", minimum=10, maximum=100, step=1, value=28)
+                            guidance_scale_multi = gr.Slider(label="CFG (Guidance Scale)", minimum=1.0, maximum=10.0, step=0.1, value=3.5)
+                            output_format_multi = gr.Dropdown(label="Output Format", choices=["jpeg", "png"], value="jpeg")
+                            aspect_ratio_choices = [
+                                "Match input image",
+                                "21:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "9:21"
+                            ]
+                            output_aspect_multi = gr.Dropdown(label="Output Aspect Ratio", choices=aspect_ratio_choices, value="Match input image")
+                            safety_multi = gr.Slider(label="Safety Tolerance (1=Strict, 6=Permissive)", minimum=1, maximum=6, step=1, value=5)
+                            save_input_multi = gr.Checkbox(label="Save Input Images with output", value=False)
+                    with gr.Column():
+                        with gr.Row():
+                            with gr.Column():
+                                gr.Markdown("### Input Images (up to 4)")
+                                gr.Markdown("Upload images or paste from clipboard. You can use up to 4 images as input.")
+                                with gr.Row(elem_classes=["multi-input-grid"]):
+                                    images_multi = [
+                                        gr.Image(label=f"Input Image {i+1}", type="pil", height=256, show_label=True, 
+                                               sources=["upload", "webcam", "clipboard"], elem_id=f"input-image-{i}")
+                                        for i in range(MAX_INPUT_IMAGES)
+                                    ]
+                        after_multi = gr.Gallery(label="Output Images", show_label=True, height=512, elem_id="output-image", columns=[2])
+                        save_output_multi = gr.Checkbox(label="Save output image", value=True)
+                        info_box_multi = gr.Markdown("", elem_id="output-info")
+
         last_seed = {"value": default_seed}
         def run_all(prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, output_aspect, image_prompt_strength, num_inference_steps, save_output, save_input):
             if lock_seed:
@@ -634,12 +776,62 @@ if (document.readyState === 'loading') {
                 image_size = {"width": resized_dims[0], "height": resized_dims[1]}
             elif output_aspect != "Match input image":
                 aspect_ratio = output_aspect
-            out_imgs, info_md = process(prompt, raw, image, int(safety), use_seed, float(guidance_scale), int(num_images), output_format, output_aspect, image_size, aspect_ratio, float(image_prompt_strength), int(num_inference_steps), save_output, save_input)
+            out_imgs, info_md = process(prompt, raw, image, int(safety), use_seed, float(guidance_scale), int(num_images), 
+                                      output_format, output_aspect, image_size, aspect_ratio, float(image_prompt_strength), 
+                                      int(num_inference_steps), save_output, save_input, is_multi_mode=False)
             return out_imgs, info_md, gr.update(value=new_seed)
-        # Run button click
-        run_btn.click(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, output_aspect, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box, seed])
+
+        def run_all_multi(prompt, raw, img1, img2, img3, img4, safety, seed, lock_seed, guidance_scale, num_images, output_format, 
+                         output_aspect, image_prompt_strength, num_inference_steps, save_output, save_input):
+            if lock_seed:
+                use_seed = int(seed)
+                new_seed = use_seed
+            else:
+                use_seed = random.randint(0, 2**32 - 1)
+                new_seed = use_seed
+            # Determine image_size or aspect_ratio for API
+            image_size = None
+            aspect_ratio = None
+            if output_aspect != "Match input image":
+                aspect_ratio = output_aspect
+            # Collect images and filter out None values
+            images = [img1, img2, img3, img4]
+            valid_images = [img for img in images if img is not None]
+            if not valid_images:
+                return [], "No valid input images provided.", gr.update(value=new_seed)
+            # Use first image's dimensions if matching input
+            if output_aspect == "Match input image" and isinstance(valid_images[0], Image.Image):
+                resized = resize_to_max_pixels(valid_images[0])
+                resized_dims = resized.size
+                image_size = {"width": resized_dims[0], "height": resized_dims[1]}
+            out_imgs, info_md = process(prompt, raw, valid_images, int(safety), use_seed, float(guidance_scale), 
+                                      int(num_images), output_format, output_aspect, image_size, aspect_ratio, 
+                                      float(image_prompt_strength), int(num_inference_steps), save_output, save_input, 
+                                      is_multi_mode=True)
+            return out_imgs, info_md, gr.update(value=new_seed)
+
+        # Run button click handlers
+        run_btn.click(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, 
+                                     output_format, output_aspect, image_prompt_strength, num_inference_steps, 
+                                     save_output, save_input], outputs=[after, info_box, seed])
+        
+        run_btn_multi.click(run_all_multi, inputs=[prompt_multi, raw_multi, *images_multi, safety_multi, seed_multi, 
+                                                 lock_seed_multi, guidance_scale_multi, num_images_multi, 
+                                                 output_format_multi, output_aspect_multi, image_prompt_strength_multi, 
+                                                 num_inference_steps_multi, save_output_multi, save_input_multi], 
+                           outputs=[after_multi, info_box_multi, seed_multi])
+
         # Prompt box: run on Ctrl+Enter
-        prompt.submit(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, output_format, output_aspect, image_prompt_strength, num_inference_steps, save_output, save_input], outputs=[after, info_box, seed], queue=True, preprocess=True)
+        prompt.submit(run_all, inputs=[prompt, raw, image, safety, seed, lock_seed, guidance_scale, num_images, 
+                                     output_format, output_aspect, image_prompt_strength, num_inference_steps, 
+                                     save_output, save_input], outputs=[after, info_box, seed], queue=True, preprocess=True)
+        
+        prompt_multi.submit(run_all_multi, inputs=[prompt_multi, raw_multi, *images_multi, safety_multi, seed_multi, 
+                                                 lock_seed_multi, guidance_scale_multi, num_images_multi, 
+                                                 output_format_multi, output_aspect_multi, image_prompt_strength_multi, 
+                                                 num_inference_steps_multi, save_output_multi, save_input_multi], 
+                           outputs=[after_multi, info_box_multi, seed_multi], queue=True, preprocess=True)
+
         # Video upload: extract first frame and set as image input
         def handle_video_extract(video_path):
             if not video_path:
@@ -664,9 +856,9 @@ if (document.readyState === 'loading') {
 
         extract_btn.click(handle_video_extract, inputs=[video_upload], outputs=[image])
         transform_btn.click(handle_transform, inputs=[image, transform_dropdown], outputs=[image])
-    # Ensure .gitignore is updated and process active jobs on startup
+
+    # Ensure .gitignore is updated
     ensure_gitignore()
-    process_active_jobs_on_startup()
     demo.launch(server_name=args.host, server_port=args.port, share=False)
 
 if __name__ == "__main__":
