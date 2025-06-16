@@ -524,8 +524,8 @@ def main():
     # Randomize default seed on UI load
     default_seed = random.randint(0, 2**32 - 1)
 
-    with gr.Blocks() as demo:
-        gr.Markdown("# Kontext UI - Open Source Fal Kontext Demo")
+    with gr.Blocks(title="Fal Kontext UI") as demo:
+        gr.Markdown("# Fal Kontext UI")
         gr.Markdown("""
 <style>
 #run-btn {
